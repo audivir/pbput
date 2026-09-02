@@ -1,0 +1,37 @@
+[package]
+name = "pbput"
+version = "0.1.0"
+edition = "2024"
+description = "Put typed data directly onto the macOS pasteboard from files or stdin"
+
+[dependencies]
+base64 = "0.22.1"
+clap = { version = "4.6.6", features = ["derive"] }
+infer = "0.22.0"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSArray",
+  "NSData",
+  "NSDictionary",
+  "NSEnumerator",
+  "NSObject",
+  "NSString",
+  "NSURL",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSPasteboard",
+  "NSPasteboardItem",
+] }
+objc2-uniform-type-identifiers = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "UTType",
+  "UTCoreTypes",
+] }
+uuid = { version = "1.26.0", features = ["v4"] }
+
+[profile.release]
+codegen-units = 1
+debug = false
+lto = "fat"
