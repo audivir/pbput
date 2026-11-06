@@ -30,6 +30,14 @@ struct Arguments {
     #[arg(short = 't', long = "type", value_name = "TYPE")]
     type_argument: Option<String>,
 
+    /// Extension, file name, or path to take the type from, e.g. pptx. Overridden by --type.
+    #[arg(short = 'e', long = "extension", value_name = "EXT")]
+    extension: Option<String>,
+
+    /// Sniff the content instead of failing if the --extension value is unknown.
+    #[arg(short = 'g', long = "guess")]
+    guess: bool,
+
     /// Materialize stdin as a temp file for apps that paste by reading a file.
     #[arg(short = 'c', long = "copy")]
     copy_to_file: bool,
@@ -51,6 +59,7 @@ struct Arguments {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PbputError {
     UnsupportedType(String),
+    UnsupportedExtension(String),
     Read(String),
     Pasteboard,
     TempFile,
@@ -61,6 +70,9 @@ impl fmt::Display for PbputError {
         match self {
             PbputError::UnsupportedType(type_argument) => {
                 write!(f, "pbput: unsupported type: {type_argument}")
+            }
+            PbputError::UnsupportedExtension(extension) => {
+                write!(f, "pbput: unsupported extension: {extension}")
             }
             PbputError::Read(path) => write!(f, "pbput: cannot read {path}"),
             PbputError::Pasteboard => write!(f, "pbput: failed to write pasteboard"),
@@ -82,12 +94,29 @@ fn resolve_type(value: &str) -> Option<Retained<UTType>> {
     (!mime.isDynamic()).then_some(mime)
 }
 
+/// Resolves an extension, file name, or path to a declared type.
+///
+/// Accepts `pptx`, `.pptx`, `test.pptx`, or `/dir/test.pptx`. For names and paths, the part after
+/// the last dot of the final component is used.
+fn resolve_extension(extension: &str) -> Option<Retained<UTType>> {
+    let name = extension.rsplit('/').next().unwrap_or(extension);
+    let extension = name.rfind('.').map_or(name, |dot| &name[dot + 1..]);
+    if extension.is_empty() {
+        return None;
+    }
+    let uti = UTType::typeWithFilenameExtension(&NSString::from_str(extension))?;
+    (!uti.isDynamic()).then_some(uti)
+}
+
 /// Resolves the pasteboard type for `data` read from `input`.
 ///
-/// An explicit `type_argument` always wins. Otherwise, for a real file path (not `-`),
-/// `detect_content_type` is tried before falling back to sniffing `data` itself.
+/// An explicit `type_argument` always wins, followed by an explicit `extension`. Otherwise, for a
+/// real file path (not `-`), `detect_content_type` is tried before falling back to sniffing
+/// `data` itself.
 fn determine_type(
     type_argument: Option<&str>,
+    extension: Option<&str>,
+    guess: bool,
     input: &str,
     data: &[u8],
     detect_content_type: impl FnOnce(&str) -> Option<Retained<UTType>>,
@@ -95,6 +124,14 @@ fn determine_type(
     if let Some(type_argument) = type_argument {
         return resolve_type(type_argument)
             .ok_or_else(|| PbputError::UnsupportedType(type_argument.to_string()));
+    }
+    if let Some(extension) = extension {
+        match resolve_extension(extension) {
+            Some(resolved) => return Ok(resolved),
+            // unknown extension: skip extension-based detection and sniff the content.
+            None if guess => return Ok(fallback_type(data)),
+            None => return Err(PbputError::UnsupportedExtension(extension.to_string())),
+        }
     }
     if input != "-"
         && let Some(detected) = detect_content_type(input)
@@ -231,6 +268,8 @@ fn main() {
 
     let resolved_type = determine_type(
         arguments.type_argument.as_deref(),
+        arguments.extension.as_deref(),
+        arguments.guess,
         &input,
         &data,
         detect_content_type,
@@ -311,33 +350,110 @@ mod tests {
 
     #[test]
     fn determine_type_prefers_explicit_argument() {
-        let resolved =
-            determine_type(Some("public.png"), "photo.jpg", b"", |_| unreachable!()).unwrap();
+        let resolved = determine_type(
+            Some("public.png"),
+            None,
+            false,
+            "photo.jpg",
+            b"",
+            |_| unreachable!(),
+        )
+        .unwrap();
         assert_eq!(id(&resolved), "public.png");
     }
 
     #[test]
     fn determine_type_rejects_invalid_explicit_argument() {
-        let error = determine_type(Some("bogus"), "-", b"", |_| unreachable!()).unwrap_err();
+        let error =
+            determine_type(Some("bogus"), None, false, "-", b"", |_| unreachable!()).unwrap_err();
         assert_eq!(error, PbputError::UnsupportedType("bogus".to_string()));
     }
 
     #[test]
+    fn determine_type_uses_extension_for_stdin() {
+        let resolved = determine_type(
+            None,
+            Some(".pptx"),
+            false,
+            "-",
+            &[0x50, 0x4B, 0x03, 0x04],
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(id(&resolved), id(&resolve_extension("pptx").unwrap()));
+        assert_ne!(id(&resolved), "public.zip-archive");
+    }
+
+    #[test]
+    fn determine_type_type_argument_beats_extension() {
+        let resolved = determine_type(
+            Some("public.png"),
+            Some("pptx"),
+            false,
+            "-",
+            b"",
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(id(&resolved), "public.png");
+    }
+
+    #[test]
+    fn determine_type_accepts_file_name_or_full_path_as_extension() {
+        for value in ["pptx", ".pptx", "test.pptx", "/some/dir.d/test.pptx"] {
+            let resolved = resolve_extension(value).unwrap();
+            assert_eq!(
+                id(&resolved),
+                id(&resolve_extension("pptx").unwrap()),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn determine_type_guess_sniffs_content_for_unknown_extension() {
+        let png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0];
+        let resolved = determine_type(
+            None,
+            Some("test.nope-xyz"),
+            true,
+            "-",
+            &png,
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(id(&resolved), "public.png");
+    }
+
+    #[test]
+    fn determine_type_rejects_unknown_extension() {
+        let error = determine_type(None, Some("nope-xyz"), false, "-", b"", |_| unreachable!())
+            .unwrap_err();
+        assert_eq!(
+            error,
+            PbputError::UnsupportedExtension("nope-xyz".to_string())
+        );
+    }
+
+    #[test]
     fn determine_type_uses_detected_content_type_for_file() {
-        let resolved =
-            determine_type(None, "photo.png", b"", |_| resolve_type("public.png")).unwrap();
+        let resolved = determine_type(None, None, false, "photo.png", b"", |_| {
+            resolve_type("public.png")
+        })
+        .unwrap();
         assert_eq!(id(&resolved), "public.png");
     }
 
     #[test]
     fn determine_type_falls_back_for_stdin_without_explicit_type() {
-        let resolved = determine_type(None, "-", b"hello", |_| unreachable!()).unwrap();
+        let resolved =
+            determine_type(None, None, false, "-", b"hello", |_| unreachable!()).unwrap();
         assert_eq!(id(&resolved), "public.utf8-plain-text");
     }
 
     #[test]
     fn determine_type_falls_back_for_undetectable_file() {
-        let resolved = determine_type(None, "photo.xyz", b"hello", |_| None).unwrap();
+        let resolved = determine_type(None, None, false, "photo.xyz", b"hello", |_| None).unwrap();
         assert_eq!(id(&resolved), "public.utf8-plain-text");
     }
 

@@ -38,6 +38,13 @@ cat image.svg | pbput --type public.svg-image
 # copy from stdin without --type, content is sniffed instead
 cat image.svg | pbput
 
+# copy from stdin with the type taken from an extension, so a PPTX file is not detected as a zip
+cat test.pptx | pbput -e pptx
+
+# the extension may also be a file name or a full path, and with -g an unknown extension
+# falls back to content sniffing instead of failing
+cat image.png | pbput -g -e image.unknownext
+
 # copy from stdin so apps like PowerPoint or ChemDraw can paste it too
 cat image.svg | pbput -c --type image/svg+xml
 
@@ -56,7 +63,9 @@ pbput -v image.png
 | Flag | Description |
 | ------------- | ---------------------------------------------------------------------------------------- |
 | `-t`, `--type TYPE` | UTI or MIME type to declare on the pasteboard. If omitted, detected from the file extension, or guessed from stdin content otherwise. |
-| `-c`, `--copy` | For stdin, also materialize the input as a temp file and put its file URL on the pasteboard, like Finder's Copy. |
+| `-e`, `--extension EXT` | Extension to take the type from, mainly for stdin. Accepts `pptx`, `.pptx`, a file name, or a full path, of which only the extension is used. Overridden by `--type`. |
+| `-g`, `--guess` | Sniff the content instead of failing if the `--extension` value is unknown. |
+| `-c`, `--copy` | For stdin, also materialize the input as a temp file and put its file URL on the pasteboard, like the Copy command of Finder. |
 | `-p`, `--path` | Treat the input as a path to a file, rather than data, and copy that file as if it were the argument. |
 | `-b`, `--base64` | Base64-encode the data before writing it to the pasteboard. |
 | `-v`, `--verbose` | Print the resolved type after copying. By default `pbput` produces no output on success. |
@@ -66,6 +75,7 @@ pbput -v image.png
 
 Without `--type`, the type comes from, in order:
 
+1. `--extension`, if given. An unknown value is an error unless `--guess` is set, which skips to the content check below.
 1. The OS-reported content type for a file, based on its extension.
 1. For stdin (or a file with an unrecognized extension), the content itself: a few common
    text-format prefixes (SVG, XML, HTML, JSON), binary file signatures detected by

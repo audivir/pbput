@@ -1,6 +1,6 @@
 [package]
 name = "pbput"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Put typed data directly onto the macOS pasteboard from files or stdin"
 

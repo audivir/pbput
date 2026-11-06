@@ -10,6 +10,11 @@ use objc2_foundation::{NSString, NSURL};
 static PASTEBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_pbput(args: &[&str], stdin: &[u8]) {
+    let status = run_pbput_status(args, stdin);
+    assert!(status.success(), "pbput exited with {status}");
+}
+
+fn run_pbput_status(args: &[&str], stdin: &[u8]) -> std::process::ExitStatus {
     let mut child = Command::new(env!("CARGO_BIN_EXE_pbput"))
         .args(args)
         .stdin(Stdio::piped())
@@ -17,8 +22,12 @@ fn run_pbput(args: &[&str], stdin: &[u8]) {
         .spawn()
         .expect("failed to spawn pbput");
     child.stdin.take().unwrap().write_all(stdin).unwrap();
-    let status = child.wait().expect("pbput did not exit");
-    assert!(status.success(), "pbput exited with {status}");
+    child.wait().expect("pbput did not exit")
+}
+
+fn pasteboard_data(identifier: &str) -> Option<Vec<u8>> {
+    let data = NSPasteboard::generalPasteboard().dataForType(&NSString::from_str(identifier));
+    data.map(|data| data.to_vec())
 }
 
 fn pasteboard_file_url() -> Option<std::path::PathBuf> {
@@ -96,4 +105,43 @@ fn copy_flag_materializes_stdin_and_writes_a_file_url_representation() {
     assert_eq!(std::fs::read_to_string(&temp_path).unwrap(), svg);
 
     std::fs::remove_file(&temp_path).ok();
+}
+
+#[test]
+fn extension_flag_declares_the_type_for_stdin_instead_of_sniffing_a_zip() {
+    let _guard = PASTEBOARD_LOCK.lock().unwrap();
+
+    let zip_header = [0x50, 0x4B, 0x03, 0x04, 0, 0];
+    run_pbput(&["--extension", "pptx"], &zip_header);
+
+    let pptx = "org.openxmlformats.presentationml.presentation";
+    assert_eq!(pasteboard_data(pptx).as_deref(), Some(&zip_header[..]));
+    assert_eq!(pasteboard_data("public.zip-archive"), None);
+}
+
+#[test]
+fn unknown_extension_fails_and_leaves_the_pasteboard_untouched() {
+    let _guard = PASTEBOARD_LOCK.lock().unwrap();
+
+    run_pbput(&[], b"previous");
+    let status = run_pbput_status(&["--extension", "test.nope-xyz"], b"new");
+
+    assert_eq!(status.code(), Some(2));
+    assert_eq!(
+        pasteboard_data("public.utf8-plain-text").as_deref(),
+        Some(&b"previous"[..])
+    );
+}
+
+#[test]
+fn guess_flag_sniffs_the_content_for_an_unknown_extension() {
+    let _guard = PASTEBOARD_LOCK.lock().unwrap();
+
+    let png_header = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0];
+    run_pbput(&["--guess", "--extension", "test.nope-xyz"], &png_header);
+
+    assert_eq!(
+        pasteboard_data("public.png").as_deref(),
+        Some(&png_header[..])
+    );
 }
